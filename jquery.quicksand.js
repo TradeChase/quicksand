@@ -11,56 +11,159 @@ Dual licensed under the MIT and GPL version 2 licenses.
 http://github.com/jquery/jquery/blob/master/MIT-LICENSE.txt
 http://github.com/jquery/jquery/blob/master/GPL-LICENSE.txt
 
+Modified by Sean Micklethwaite (Trade Chase) for Knockout.js support and
+to use CSS transforms (Feb 2012).
+
 Project site: http://razorjack.net/quicksand
 Github site: http://github.com/razorjack/quicksand
 
 */
 
 (function ($) {
-    $.fn.quicksand = function (collection, customOptions) {     
+    var DEBUG = window.DEBUG;
+
+    var cssTrans = window.Modernizr && window.Modernizr.csstransitions;
+    var cssTransforms = window.Modernizr && window.Modernizr.csstransforms;
+    var cssTransName = $.browser.webkit ? '-webkit-transition'
+        : $.browser.mozilla ? 'MozTransition'
+        : $.browser.opera ? 'OTransition'
+        : $.browser.msie ? 'msTransition'
+        : 'transition';
+    var cssTransformName = $.browser.webkit ? '-webkit-transform'
+        : $.browser.mozilla ? 'MozTransform'
+        : $.browser.opera ? 'OTransform'
+        : $.browser.msie ? 'msTransform'
+        : 'transform';
+    var cssTransformPropertyName = $.browser.webkit ? '-webkit-transform'
+        : $.browser.mozilla ? '-moz-transform'
+        : $.browser.opera ? '-o-transform'
+        : $.browser.msie ? '-ms-transform'
+        : 'transform';
+
+    function removeToInsertLater(element) {
+        var parentNode = element.parentNode;
+        var nextSibling = element.nextSibling;
+        parentNode.removeChild(element);
+        return function () {
+            if (nextSibling) {
+                parentNode.insertBefore(element, nextSibling);
+            } else {
+                parentNode.appendChild(element);
+            }
+        };
+    };
+
+    var transform, setTransform, getTransform;
+    if (cssTransforms) {
+        transform = function (element, animation, d, e) {
+            var origAnimation = element.data('quicksand-animation');
+            if (origAnimation) {
+                animation = $.extend({}, origAnimation, animation);
+            }
+
+            var trans = '';
+            if ('left' in animation) {
+                trans += ' translateX(' + animation.left + 'px)';
+            }
+            if ('top' in animation) {
+                trans += ' translateY(' + animation.top + 'px)';
+            }
+            if ('scale' in animation) {
+                trans += ' scale(' + animation.scale + ')';
+            }
+            trans = trans.trim();
+            if (trans && trans != element[0].style[cssTransformName]) {
+                element[0].style[cssTransName] = d ? cssTransformPropertyName + ' ' + (d / 1000) + 's ease-in-out' : 'all 0s';
+                element[0].style[cssTransformName] = trans;
+            }
+
+            if ('opacity' in animation) {
+                element.fadeTo(d, animation.opacity, e);
+                delete animation.opacity;
+            }
+
+            element.data('quicksand-animation', animation);
+        }
+        setTransform = function (element, animation) {
+            transform(element, animation, 0);
+        }
+        getTransform = function (element) {
+            return element.data('quicksand-animation') || {};
+        }
+    } else {
+        transform = function (element, animation, duration, easing) {
+            element.stop(true, true).css('position', 'relative');
+            element.animate(animation, duration, easing);
+        }
+        setTransform = function (element, animation) {
+            animation.position = 'relative';
+            element.stop(true, true).css(animation);
+        }
+        getTransform = function (element) {
+            return {
+                top: parseInt(element.css('top')),
+                left: parseInt(element.css('left'))
+            }
+        }
+    }
+
+    function getOffset(e) {
+        return {
+            left: e[0].offsetLeft, top: e[0].offsetTop
+        }
+    }
+    function oadd(a, b) {
+        return { left: a.left + b.left, top: a.top + b.top };
+    }
+    function osub(a, b) {
+        return { left: a.left - b.left, top: a.top - b.top };
+    }
+
+    $.fn.quicksand = function (collection, customOptions) {
         var options = {
-            duration: 750,
+            duration: 1200,
             easing: 'swing',
             attribute: 'data-id', // attribute to recognize same items within source and dest
             adjustHeight: 'auto', // 'dynamic' animates height during shuffling (slow), 'auto' adjusts it before or after the animation, false leaves height constant
             useScaling: true, // disable it if you're not using scaling effect or want to improve performance
-            enhancement: function(c) {}, // Visual enhacement (eg. font replacement) function for cloned elements
+            enhancement: function (c) { }, // Visual enhacement (eg. font replacement) function for cloned elements
             selector: '> *',
             dx: 0,
             dy: 0
         };
         $.extend(options, customOptions);
-        
-        if ($.browser.msie || (typeof($.fn.scale) == 'undefined')) {
+
+        if ($.browser.msie || (typeof ($.fn.scale) == 'undefined')) {
             // Got IE and want scaling effect? Kiss my ass.
             options.useScaling = false;
         }
-        
+
         var callbackFunction;
-        if (typeof(arguments[1]) == 'function') {
+        if (typeof (arguments[1]) == 'function') {
             var callbackFunction = arguments[1];
-        } else if (typeof(arguments[2] == 'function')) {
+        } else if (typeof (arguments[2] == 'function')) {
             var callbackFunction = arguments[2];
         }
-    
-        
-        return this.each(function (i) {
+
+
+        return this.each(function __quicksand(i) {
             var val;
             var animationQueue = []; // used to store all the animation params before starting the animation; solves initial animation slowdowns
             var $collection = $(collection).clone(); // destination (target) collection
             var $sourceParent = $(this); // source, the visible container of source collection
             var sourceHeight = $(this).css('height'); // used to keep height and document flow during the animation
-            
+
+            if (cssTrans) $sourceParent.addClass('quicksand');
+
             var destHeight;
             var adjustHeightOnCallback = false;
-            
-            var offset = $($sourceParent).offset(); // offset of visible container, used in animation calculations
-            var offsets = []; // coordinates of every source collection item            
-            
-            var $source = $(this).find(options.selector); // source collection items
-            
+
             // Replace the collection and quit if IE6
-            if ($.browser.msie && $.browser.version.substr(0,1)<7) {
+            // also if css transforms aren't supported, and this is a table.
+            // and opera can fuck off.
+            if (($.browser.msie && $.browser.version.substr(0, 1) < 7)
+                || (!cssTransforms && $collection.filter('tr').length)
+                || ($.browser.opera)) {
                 $sourceParent.html('').append($collection);
                 return;
             }
@@ -68,240 +171,178 @@ Github site: http://github.com/razorjack/quicksand
             // Gets called when any animation is finished
             var postCallbackPerformed = 0; // prevents the function from being called more than one time
             var postCallback = function () {
-                
                 if (!postCallbackPerformed) {
                     postCallbackPerformed = 1;
-                    
-                    // hack: 
-                    // used to be: $sourceParent.html($dest.html()); // put target HTML into visible source container
-                    // but new webkit builds cause flickering when replacing the collections
-                    $toDelete = $sourceParent.find('> *');
-                    $sourceParent.prepend($dest.find('> *'));
-                    $toDelete.remove();
-                         
-                    if (adjustHeightOnCallback) {
-                        $sourceParent.css('height', destHeight);
-                    }
+
+                    $sourceParent.find('> *[data-remove="true"]').remove();
+                    $sourceParent.find(options.selector).stop(true, true);
+
                     options.enhancement($sourceParent); // Perform custom visual enhancements on a newly replaced collection
                     if (typeof callbackFunction == 'function') {
                         callbackFunction.call(this);
-                    }                    
+                    }
+
+                    $sourceParent.data('quicksand-postCallback-timer', 0);
+                    $sourceParent.data('quicksand-postCallback', null);
                 }
             };
-            
-            // Position: relative situations
-            var $correctionParent = $sourceParent.offsetParent();
-            var correctionOffset = $correctionParent.offset();
-            if ($correctionParent.css('position') == 'relative') {
-                if ($correctionParent.get(0).nodeName.toLowerCase() == 'body') {
 
-                } else {
-                    correctionOffset.top += (parseFloat($correctionParent.css('border-top-width')) || 0);
-                    correctionOffset.left +=( parseFloat($correctionParent.css('border-left-width')) || 0);
-                }
-            } else {
-                correctionOffset.top -= (parseFloat($correctionParent.css('border-top-width')) || 0);
-                correctionOffset.left -= (parseFloat($correctionParent.css('border-left-width')) || 0);
-                correctionOffset.top -= (parseFloat($correctionParent.css('margin-top')) || 0);
-                correctionOffset.left -= (parseFloat($correctionParent.css('margin-left')) || 0);
+            // If last anim not finished, execute the post callback now
+            var lastPostCallback = $sourceParent.data('quicksand-postCallback-timer');
+            if (lastPostCallback) {
+                clearTimeout(lastPostCallback);
+                $sourceParent.data('quicksand-postCallback')();
             }
-            
-            // perform custom corrections from options (use when Quicksand fails to detect proper correction)
-            if (isNaN(correctionOffset.left)) {
-                correctionOffset.left = 0;
-            }
-            if (isNaN(correctionOffset.top)) {
-                correctionOffset.top = 0;
-            }
-            
-            correctionOffset.left -= options.dx;
-            correctionOffset.top -= options.dy;
 
-            // keeps nodes after source container, holding their position
-            $sourceParent.css('height', $(this).height());
-            
+
             // get positions of source collections
-            $source.each(function (i) {
-                offsets[i] = $(this).offset();
+            var offsets = {}; // coordinates of every source collection item   
+            $sourceParent.find(options.selector).each(function (i) {
+                var e = $(this);
+
+                if (!cssTransforms) setTransform(e, { left: 0, top: 0 });
+
+                offsets[e.attr(options.attribute)] = oadd(getOffset(e), getTransform(e));
             });
-            
+
+            // save original items, and replace with destination collection
+            var contentsHolder = $('<div>');
+            var contents = $sourceParent.contents();
+            contentsHolder.append(contents);
+            $sourceParent.append($collection);
+
+            // get destination offsets
+            var dstOffsets = {};
+            $collection.each(function () {
+                var e = $(this);
+                dstOffsets[e.attr(options.attribute)] = getOffset(e);
+            });
+
+            // now replace the collection
+            $collection.remove();
+            $sourceParent.append(contents);
+
+            var $source = $(this).find(options.selector); // source collection items
+
             // stops previous animations on source container
             $(this).stop();
-            var dx = 0; var dy = 0;
             $source.each(function (i) {
                 $(this).stop(); // stop animation of collection items
-                var rawObj = $(this).get(0);
-                if (rawObj.style.position == 'absolute') {
-                    dx = -options.dx;
-                    dy = -options.dy;
-                } else {
-                    dx = options.dx;
-                    dy = options.dy;                    
-                }
-
-                rawObj.style.position = 'absolute';
-                rawObj.style.margin = '0';
-
-                rawObj.style.top = (offsets[i].top - parseFloat(rawObj.style.marginTop) - correctionOffset.top + dy) + 'px';
-                rawObj.style.left = (offsets[i].left - parseFloat(rawObj.style.marginLeft) - correctionOffset.left + dx) + 'px';
             });
-                    
-            // create temporary container with destination collection
-            var $dest = $($sourceParent).clone();
-            var rawDest = $dest.get(0);
-            rawDest.innerHTML = '';
-            rawDest.setAttribute('id', '');
-            rawDest.style.height = 'auto';
-            rawDest.style.width = $sourceParent.width() + 'px';
-            $dest.append($collection);      
-            // insert node into HTML
-            // Note that the node is under visible source container in the exactly same position
-            // The browser render all the items without showing them (opacity: 0.0)
-            // No offset calculations are needed, the browser just extracts position from underlayered destination items
-            // and sets animation to destination positions.
-            $dest.insertBefore($sourceParent);
-            $dest.css('opacity', 0.0);
-            rawDest.style.zIndex = -1;
-            
-            rawDest.style.margin = '0';
-            rawDest.style.position = 'absolute';
-            rawDest.style.top = offset.top - correctionOffset.top + 'px';
-            rawDest.style.left = offset.left - correctionOffset.left + 'px';
-            
-            
-    
-            
 
-            if (options.adjustHeight === 'dynamic') {
-                // If destination container has different height than source container
-                // the height can be animated, adjusting it to destination height
-                $sourceParent.animate({height: $dest.height()}, options.duration, options.easing);
-            } else if (options.adjustHeight === 'auto') {
-                destHeight = $dest.height();
-                if (parseFloat(sourceHeight) < parseFloat(destHeight)) {
-                    // Adjust the height now so that the items don't move out of the container
-                    $sourceParent.css('height', destHeight);
-                } else {
-                    //  Adjust later, on callback
-                    adjustHeightOnCallback = true;
-                }
-            }
-                
+            var reinsert = removeToInsertLater($sourceParent[0]);
+
             // Now it's time to do shuffling animation
-            // First of all, we need to identify same elements within source and destination collections    
+            // First of all, we need to identify same elements within source and destination collections
+            var toMove = [], toRemove = [], toAdd = [];
+            var lastInserted = null;
             $source.each(function (i) {
-                var destElement = [];
-                if (typeof(options.attribute) == 'function') {
-                    
-                    val = options.attribute($(this));
-                    $collection.each(function() {
-                        if (options.attribute(this) == val) {
-                            destElement = $(this);
-                            return false;
-                        }
-                    });
-                } else {
-                    destElement = $collection.filter('[' + options.attribute + '=' + $(this).attr(options.attribute) + ']');
-                }
-                if (destElement.length) {
+                var e = $(this);
+                if (dstOffsets[e.attr(options.attribute)]) {
                     // The item is both in source and destination collections
                     // It it's under different position, let's move it
-                    if (!options.useScaling) {
-                        animationQueue.push(
-                                            {
-                                                element: $(this), 
-                                                animation: 
-                                                    {top: destElement.offset().top - correctionOffset.top, 
-                                                     left: destElement.offset().left - correctionOffset.left, 
-                                                     opacity: 1.0
-                                                    }
-                                            });
-
-                    } else {
-                        animationQueue.push({
-                                            element: $(this), 
-                                            animation: {top: destElement.offset().top - correctionOffset.top, 
-                                                        left: destElement.offset().left - correctionOffset.left, 
-                                                        opacity: 1.0, 
-                                                        scale: '1.0'
-                                                       }
-                                            });
-
-                    }
+                    // keep active items prepended, so relative position isn't broken
+                    if (lastInserted)
+                        e.insertAfter(lastInserted);
+                    else
+                        e.prependTo($sourceParent);
+                    lastInserted = e;
+                    toMove.push(e);
                 } else {
                     // The item from source collection is not present in destination collections
-                    // Let's remove it
-                    if (!options.useScaling) {
-                        animationQueue.push({element: $(this), 
-                                             animation: {opacity: '0.0'}});
-                    } else {
-                        animationQueue.push({element: $(this), animation: {opacity: '0.0', 
-                                         scale: '0.0'}});
-                    }
+                    // Let's remove it, from end of collection
+                    e.remove().appendTo($sourceParent);
+                    toRemove.push(e);
                 }
             });
-            
+
             $collection.each(function (i) {
                 // Grab all items from target collection not present in visible source collection
-                
-                var sourceElement = [];
-                var destElement = [];
-                if (typeof(options.attribute) == 'function') {
-                    val = options.attribute($(this));
-                    $source.each(function() {
-                        if (options.attribute(this) == val) {
-                            sourceElement = $(this);
-                            return false;
-                        }
-                    });                 
+                var id = $(this).attr(options.attribute);
+                var sourceElement = $source.filter('[' + options.attribute + '=' + id + ']');
 
-                    $collection.each(function() {
-                        if (options.attribute(this) == val) {
-                            destElement = $(this);
-                            return false;
-                        }
-                    });
-                } else {
-                    sourceElement = $source.filter('[' + options.attribute + '=' + $(this).attr(options.attribute) + ']');
-                    destElement = $collection.filter('[' + options.attribute + '=' + $(this).attr(options.attribute) + ']');
-                }
-                
-                var animationOptions;
                 if (sourceElement.length === 0) {
                     // No such element in source collection...
-                    if (!options.useScaling) {
-                        animationOptions = {
-                            opacity: '1.0'
-                        };
-                    } else {
-                        animationOptions = {
-                            opacity: '1.0',
-                            scale: '1.0'
-                        };
-                    }
                     // Let's create it
-                    d = destElement.clone();
-                    var rawDestElement = d.get(0);
-                    rawDestElement.style.position = 'absolute';
-                    rawDestElement.style.margin = '0';
-                    rawDestElement.style.top = destElement.offset().top - correctionOffset.top + 'px';
-                    rawDestElement.style.left = destElement.offset().left - correctionOffset.left + 'px';
-                    d.css('opacity', 0.0); // IE
-                    if (options.useScaling) {
-                        d.css('transform', 'scale(0.0)');
-                    }
-                    d.appendTo($sourceParent);
-                    
-                    animationQueue.push({element: $(d), 
-                                         animation: animationOptions});
+                    var d = $(this).clone();
+                    d.css('opacity', 0.0);
+                    d.prependTo($sourceParent);
+                    toAdd.push(d);
                 }
             });
-            
-            $dest.remove();
+
+            reinsert();
+
+            // Now do the repositioning and animation
+            for (i = 0; i < toMove.length; i++) {
+                var e = toMove[i];
+                var id = e.attr(options.attribute);
+                if (!cssTransforms) setTransform(e, { left: 0, top: 0 });
+                var current = getOffset(e);
+                var src = offsets[id];
+                var dst = dstOffsets[id];
+
+                if (DEBUG) console.log("move", id, current.top, src.top, dst.top);
+                setTransform(e, osub(src, current));
+                animationQueue.push({
+                    element: e, animation: osub(dst, current)
+                });
+                e.attr('data-remove', false);
+            }
+
+            for (i = 0; i < toRemove.length; i++) {
+                var e = toRemove[i];
+                var id = e.attr(options.attribute);
+                if (!cssTransforms) setTransform(e, { left: 0, top: 0 });
+                var current = getOffset(e);
+                var src = offsets[id];
+
+                if (DEBUG) console.log("remove", id, current.top, src.top);
+                setTransform(e, osub(src, current));
+
+                e.attr('data-remove', true);
+                if (!options.useScaling) {
+                    animationQueue.push({ element: e,
+                        animation: { opacity: '0.0' }
+                    });
+                } else {
+                    animationQueue.push({ element: e, animation: { opacity: '0.0',
+                        scale: '0.0'
+                    }
+                    });
+                }
+            }
+
+            for (i = 0; i < toAdd.length; i++) {
+                var e = toAdd[i];
+                var id = e.attr(options.attribute);
+                if (!cssTransforms) setTransform(e, { left: 0, top: 0 });
+                var current = getOffset(e);
+                var dst = dstOffsets[id];
+                var animationOptions = {
+                    opacity: 1.0
+                };
+                if (options.useScaling) {
+                    d.css(prefix + 'transform', 'scale(0.0)');
+                    animationOptions.scale = 1.0;
+                }
+
+                if(DEBUG) console.log("add", id, current.top, dst.top, e);
+                setTransform(e, osub(dst, current));
+
+                animationQueue.push({
+                    element: e,
+                    animation: animationOptions
+                });
+            }
+
             options.enhancement($sourceParent); // Perform custom visual enhancements during the animation
             for (i = 0; i < animationQueue.length; i++) {
-                animationQueue[i].element.animate(animationQueue[i].animation, options.duration, options.easing, postCallback);
+                transform.call(this, animationQueue[i].element, animationQueue[i].animation, options.duration, options.easing, postCallback);
             }
+
+            $sourceParent.data('quicksand-postCallback', postCallback);
+            $sourceParent.data('quicksand-postCallback-timer', setTimeout(postCallback, options.duration));
         });
     };
 })(jQuery);
